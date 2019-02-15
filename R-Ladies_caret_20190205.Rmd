@@ -1,0 +1,250 @@
+---
+title: "R-Ladies Workshop: Classification using Caret"
+author: "Ashley Thompson (@ABTresearch) & Maya Alsheh Ali (maya.alsheh.ali@ki.se)" 
+date: "Feburary 2019"
+output:
+  word_document: default
+  pdf_document: default
+  html_document: default
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Packages Needed
+
+```{r echo= TRUE, message= FALSE, warning=FALSE, eval=TRUE}
+
+library(caret)
+library(ggplot2)
+library(car)
+library(ROCR)
+```
+## Data Preparation
+
+**Load data**  
+*Information on data can be found here:*
+<https://archive.ics.uci.edu/ml/datasets/Wine%2BQuality>  
+
+```{r echo= TRUE}
+df = read.csv( 'https://archive.ics.uci.edu/ml/machine-learning-databases/wine-quality/winequality-white.csv' , sep=';' , header=T )
+
+#examine data
+str(df)
+
+```
+
+**Modify Outcome variable**  
+*Our outcome, quality, is a continuous integer and this classification task requires the outcome to be a binary factor. I've then renamed the labels to "bad" & "good" for readability and because "0" & "1" label names create issues in some packages.*
+```{r echo= TRUE, tidy=TRUE}
+#create new binary variable
+df$quality.bi = NA
+df$quality.bi= car::recode(df$quality, "1:5= 0; 5:10= 1")
+
+#change to factor & change label
+df$quality.bi = as.factor(df$quality.bi)
+levels(df$quality.bi) = c("bad", "good")
+
+#check variable
+table(df$quality.bi)
+
+#remove quality
+df = df[ -c(12)]
+```
+  
+**Check for missing values**  
+*We must have complete cases for analysis*
+```{r echo=TRUE}
+row.has.na = apply(df, 1, function(x){any(is.na(x))})
+sum(row.has.na)
+```
+  
+**Check variance**
+```{r echo=TRUE}
+nearZeroVar(df, saveMetrics = TRUE, names=TRUE)
+```
+
+*We see that there are no missing values nor variables with near zero variance. 
+In the case that there were missing values, we could use multiple imputation with the package mice (use CART option) or simply remove the row.
+In the case that there are variables with near or at zero variance, you should consider removing or combining similar variables to increase power. Ex: combining pollen allegery and animal fur allergy into one allergy.* 
+
+## Check Power
+
+**Build Learning Curve**
+```{r echo=TRUE, tidy=TRUE}
+learning.Curve = learing_curve_dat(dat = df,
+                             outcome = 'quality.bi',
+                             test_prop = .30, #the % of data you want in testset
+                             method = "rf", #random Forest
+                             metric = "ROC",
+                             trControl = trainControl(classProbs = TRUE,
+                                                      summaryFunction = twoClassSummary))
+
+```
+  
+**Plot**
+```{r echo=TRUE, tidy=TRUE}
+curve.plot = ggplot(learning.Curve, aes(x = Training_Size, y = ROC, color = Data)) +
+  geom_smooth(method = loess, span = .8) +
+  theme_bw()
+
+curve.plot
+
+```
+*The learning curve is used to determine power estimates and can give information on the bias vs variance trade off. Because the blue line stays at it's maximum regardless of training size, the data is likely to overfit; we are likely underpowered and will need to use less complex models*
+
+
+## Data Partition
+```{r echo=TRUE, tidy=TRUE}
+#Set the fractions of the dataframe you want to split into training, 
+# validation, and test. 
+fractionTraining   = 0.60
+fractionValidation = 0.10
+fractionTest       = 0.30
+
+# Compute sample sizes.
+sampleSizeTraining   = floor(fractionTraining   * nrow(df))
+sampleSizeValidation = floor(fractionValidation * nrow(df))
+sampleSizeTest       = floor(fractionTest       * nrow(df))
+
+#forloop here 
+folds = createFolds(nrow(df), 20)	#20 folds
+for(i in unique(folds))	{
+  
+  # Create the randomly-sampled indices for the dataframe. Use setdiff() to
+  # avoid overlapping subsets of indices.
+  indicesTraining    = sort(sample(seq_len(nrow(df)), size=sampleSizeTraining))
+  indicesNotTraining = setdiff(seq_len(nrow(df)), indicesTraining)
+  indicesValidation  = sort(sample(indicesNotTraining, size=sampleSizeValidation))
+  indicesTest        = setdiff(indicesNotTraining, indicesValidation)
+  
+  # Finally, output the three dataframes for training, Validation and test.
+  Trainset   = df[indicesTraining, ]
+  Validationset = df[indicesValidation, ]
+  Testset       = df[indicesTest, ]
+}
+```
+
+## Build Random Forest Model
+
+**Build Model**
+```{r echo=TRUE, tidy=TRUE}
+rf.model <- caret::train(quality.bi ~ .,  data = Trainset, method = "rf")
+```
+
+**Plot variable importance**
+```{r echo=TRUE, tidy=TRUE}
+VIrf= varImp(rf.model)
+plot(VIrf)
+```
+*This shows how much the model relied certain variables. To understand if a variable was positively or negatively associated with the outcome a partial plot can be created.*
+  
+**Test Model on Training set**
+```{r echo=TRUE, tidy=TRUE}
+train.pred <- predict(rf.model, Trainset)
+confusionMatrix(train.pred, Trainset$quality.bi)
+```
+*We see that this model is highly accurate, however this is not surprising since this is the same data the model learned from. Let's see how it does on an "new" dataset.*
+  
+**Test Model on Validation set**
+```{r echo=TRUE, tidy=TRUE}
+Validation.pred1 = predict(rf.model, Validationset)
+
+#examine prediction, outputting only a table
+Validation.pred.table = table(observed = Validationset$quality.bi, predicted = Validation.pred1)
+Validation.pred.table
+```
+
+**Plot AUC using ROCR package**
+```{r echo=TRUE, tidy=TRUE}
+#determine performance with ROCR
+Validationpredict <- ROCR::prediction(as.numeric(Validationpred1), as.numeric(Validationset$quality.bi))
+Validationpredict.perf = ROCR::performance(Validationpredict,"tpr","fpr")
+
+#plot
+plot(Validationpredict.perf,main="ROC Curve for Random Forest",col=2,lwd=2, print.auc = TRUE)
+abline(a=0,b=1,lwd=2,lty=2,col="gray")
+
+#print
+Validationrfauc <- ROCR::performance(Validationpredict, measure = "auc")@y.values[[1]]
+Validationrfauc
+``` 
+*The performance dropped significantly! Let's see if we can increase model performance.*
+  
+## Tune Model
+
+*There are several ways to choose optimal parameters in your model: manually selecting them (time consuming), random search, and grid search. According to the No Free Lunch Theorem, on average grid search and random search have equal performance. Today we'll be using Random Search.*
+
+**Set up random search**
+```{r echo=TRUE, tidy=TRUE}
+#this code sets the method to repeated cross validation, 10 folds, 3 times.
+control <- trainControl(method="repeatedcv", number=10, repeats=3, search="random")
+```
+  
+**Create new model with random search**  
+*The random search will rerun the model to find optimal parameters with repeated cross validation  
+note: this may take a few minutes to run*
+```{r echo=TRUE, tidy=TRUE}
+rf.random.model <- caret::train(quality.bi ~ ., data=Trainset, method="rf", tuneLength=15, trControl=control)
+print(rf.random.model) #examine parameter performance
+```
+  
+**Plot Variable Importance**
+```{r echo=TRUE, tidy=TRUE}
+VIrfrandom= varImp(rf.random.model)
+plot(VIrfrandom)
+```
+*Did the variable importance change between the models?*
+
+**Predict Validation set using the new model**
+```{r echo=TRUE, tidy=TRUE}
+Validation.pred2 = predict(rf.random.model, Validationset)
+
+#examine prediction
+Validation.pred.table2 = table(observed = Validationset$quality.bi, predicted = Validation.pred2)
+Validation.pred.table2
+```
+  
+**Plot AUC**
+```{r echo=TRUE, tidy=TRUE}
+#Determine performance
+Validation.predict2 <- ROCR::prediction(as.numeric(Validation.pred2), as.numeric(Validationset$quality.bi))
+Validation.predict.perf2 = ROCR::performance(Validation.predict2,"tpr","fpr")
+
+#plot
+plot(Validation.predict.perf2,main="ROC Curve for Random Forest",col=2,lwd=2, print.auc = TRUE)
+abline(a=0,b=1,lwd=2,lty=2,col="gray")
+
+#print 
+Validation.rf.auc2 <- ROCR::performance(Validation.predict2, measure = "auc")@y.values[[1]]
+Validation.rf.auc2
+```
+*An AUC of ~.8! A fairly good AUC, let's put it to the test set. You can repeat the model tuning set step as many times as it takes you to get a model you're satisfied with.*
+
+## Test model on Test set
+
+*Remember you can only do this step one time*
+```{r echo=TRUE}
+test.pred= predict(rf.model, newdata = Testset)
+```
+  
+**Examine**
+```{r echo=TRUE}
+confusionMatrix(test.pred, Testset$quality.bi)
+```
+  
+**Plot AUC**
+```{r echo=TRUE, tidy=TRUE}
+
+test.predict <- ROCR::prediction(as.numeric(test.pred), as.numeric(Testset$quality.bi))
+test.predict.perf = ROCR::performance(test.predict,"tpr","fpr")
+plot(test.predict.perf,main="ROC Curve for Random Forest",col=2,lwd=2, print.auc = TRUE)
+abline(a=0,b=1,lwd=2,lty=2,col="gray")
+#print Final AUC
+final.auc <- ROCR::performance(test.predict, measure = "auc")@y.values[[1]]
+final.auc
+``` 
+
+*All finished! Now try on your own with the red wine data from the same link.*
